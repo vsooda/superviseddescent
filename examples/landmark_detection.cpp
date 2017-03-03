@@ -151,6 +151,8 @@ std::pair<vector<Mat>, Mat> load_ibug_data(fs::path directory)
 	return std::make_pair(images, landmarks);
 };
 
+
+
 /**
  * Function object that extracts HoG features at given 2D landmark locations
  * and returns them as a row vector.
@@ -312,6 +314,32 @@ cv::Mat load_mean(fs::path filename)
 	return mean;
 };
 
+cv::Mat load_self_mean(fs::path filename) {
+	std::ifstream file(filename.string());
+	if (!file.is_open()) {
+		throw std::runtime_error(string("Could not open file: " + filename.string()));
+	}
+
+	string line;
+	int num_landmarks = 74;
+	Mat mean(1, 2 * num_landmarks, CV_32FC1);
+    std::vector<float> meanValues;
+	int i = 0;
+	while (getline(file, line)) {
+        float value = std::stof(line);
+        value = value - 0.5;
+		std::cout << i++ << " " <<  value << std::endl;
+        meanValues.push_back(value);
+	}
+	for (int i = 0; i < num_landmarks; i++) {
+		mean.at<float>(i) = meanValues[2 * i];
+	}
+	for (int i = 0; i < num_landmarks; i++) {
+		mean.at<float>(i+num_landmarks) = meanValues[2 * i + 1];
+	}
+	return mean;
+}
+
 /**
  * Performs an initial alignment of the model, by putting the mean model into
  * the center of the face box.
@@ -355,6 +383,50 @@ void draw_landmarks(cv::Mat image, cv::Mat landmarks, cv::Scalar color = cv::Sca
 	}
 }
 
+
+void load_self_data(std::string filepath, vector<Mat>& images, Mat& landmarks, Mat model_mean, Mat& x0) {
+	//vector<Mat> images;
+	//Mat landmarks;
+	int landmarkNum = 74;
+	FILE* fin = fopen(filepath.c_str(), "r");
+	if (fin == NULL){
+		printf("%s is no exists", filepath.c_str());
+		throw "load annotate data error";
+	}
+	std::cout << "global landmark num: " << landmarkNum << std::endl;
+	std::string basename;
+	basename = "/home/sooda/data/photos/";
+	char filename[80];
+	int cnt = 0;
+	while(fscanf(fin, "%s%*c", filename) != EOF) {
+		cnt++;
+		std::string fullname = basename + filename;
+		images.emplace_back(cv::imread(fullname));
+		std::cout << cnt << " " << fullname << std::endl;
+
+		int left, top, right, bottom;
+		fscanf(fin, "%d %d %d %d%*c", &left, &top, &right, &bottom);
+
+		cv::Rect bb;
+		bb.x = left;
+		bb.y = top;
+		bb.width = right - left;
+		bb.height = bottom - top;
+
+		x0.push_back(align_mean(model_mean, bb));
+
+		Mat landmarks_as_row(1, 2 * landmarkNum, CV_32FC1);
+		for(int j = 0; j < landmarkNum; j++) {
+			int x, y;
+			fscanf(fin, "%d %d%*c", &x, &y);
+			landmarks_as_row.at<float>(j) = x;
+			landmarks_as_row.at<float>(j+landmarkNum) = y;
+		}
+		landmarks.push_back(landmarks_as_row);
+	}
+	fclose(fin);
+};
+
 /**
  * This app demonstrates learning of the descent direction from data for
  * a simple facial landmark detection sample app.
@@ -377,9 +449,9 @@ int main(int argc, char *argv[])
 		desc.add_options()
 			("help,h",
 				"display the help message")
-			("data,d", po::value<fs::path>(&trainingset)->required()->default_value("data/examples/ibug_lfpw_trainset"),
+			("data,d", po::value<fs::path>(&trainingset)->required()->default_value("mini2.txt"),
 				"path to ibug LFPW example images and landmarks")
-			("mean,m", po::value<fs::path>(&meanfile)->required()->default_value("data/examples/mean_ibug_lfpw_68.txt"),
+			("mean,m", po::value<fs::path>(&meanfile)->required()->default_value("mean"),
 				"pre-calculated mean from ibug LFPW")
 			("facedetector,f", po::value<fs::path>(&facedetector)->required(),
 				"full path to OpenCV's face detector (haarcascade_frontalface_alt2.xml)")
@@ -399,10 +471,14 @@ int main(int argc, char *argv[])
 		return EXIT_SUCCESS;
 	}
 
+	// Load the pre-calculated (and scaled) mean of all landmarks:
+	Mat model_mean = load_self_mean(meanfile);
 	vector<Mat> training_images;
 	Mat training_landmarks;
+	Mat x0;
 	try	{
-		std::tie(training_images, training_landmarks) = load_ibug_data(trainingset);
+		//std::tie(training_images, training_landmarks) = load_ibug_data(trainingset);
+		load_self_data(trainingset.string(), training_images, training_landmarks, model_mean, x0);
 	}
 	catch (const fs::filesystem_error& e)
 	{
@@ -410,9 +486,6 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
-	// Load the pre-calculated (and scaled) mean of all landmarks:
-	Mat model_mean = load_mean(meanfile);
-	
 	// Load the face detector from OpenCV:
 	cv::CascadeClassifier face_cascade;
 	if (!face_cascade.load(facedetector.string()))
@@ -421,15 +494,6 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 	
-	// Run the face detector and obtain the initial estimate x0 using the mean landmarks:
-	Mat x0;
-	for (size_t i = 0; i < training_images.size(); ++i) {
-		vector<cv::Rect> detected_faces;
-		face_cascade.detectMultiScale(training_images[i], detected_faces, 1.2, 2, 0, cv::Size(50, 50));
-		// In a real application, you should verify that the detected face is not a false positive
-		x0.push_back(align_mean(model_mean, cv::Rect(detected_faces[0])));
-	}
-
 	// We might want to augment the training set by perturbing the
 	// initialisations, which we skip here.
 
@@ -460,7 +524,7 @@ int main(int argc, char *argv[])
 	// );
 	
 	// Detect the landmarks on a single image:
-	Mat image = cv::imread((trainingset / fs::path("image_0005.png")).string());
+	Mat image = cv::imread("image_0005.png");
 	vector<cv::Rect> detected_faces;
 	face_cascade.detectMultiScale(image, detected_faces, 1.2, 2, 0, cv::Size(50, 50));
 	Mat initial_alignment = align_mean(model_mean, cv::Rect(detected_faces[0]));
