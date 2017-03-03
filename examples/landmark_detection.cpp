@@ -449,11 +449,11 @@ int main(int argc, char *argv[])
 		desc.add_options()
 			("help,h",
 				"display the help message")
-			("data,d", po::value<fs::path>(&trainingset)->required()->default_value("mini2.txt"),
+			("data,d", po::value<fs::path>(&trainingset)->required()->default_value("examples/data/mini2.txt"),
 				"path to ibug LFPW example images and landmarks")
-			("mean,m", po::value<fs::path>(&meanfile)->required()->default_value("mean"),
+			("mean,m", po::value<fs::path>(&meanfile)->required()->default_value("examples/data/mean74"),
 				"pre-calculated mean from ibug LFPW")
-			("facedetector,f", po::value<fs::path>(&facedetector)->required(),
+			("facedetector,f", po::value<fs::path>(&facedetector)->required()->default_value("examples/data/haarcascade_frontalface_alt2.xml"),
 				"full path to OpenCV's face detector (haarcascade_frontalface_alt2.xml)")
 			;
 		po::variables_map vm;
@@ -516,6 +516,11 @@ int main(int argc, char *argv[])
 	
 	supervised_descent_model.train(training_landmarks, x0, Mat(), hog, print_residual);
 
+	// Save the learned model:
+	std::ofstream learned_model_file("landmark_regressor_self.bin", std::ios::binary);
+	cereal::BinaryOutputArchive output_archive(learned_model_file);
+	output_archive(supervised_descent_model);
+
 	// To test on a whole bunch of images, we could do something roughly like this:
 	// supervisedDescentModel.test(x0_ts,
 	//	Mat(),
@@ -524,7 +529,7 @@ int main(int argc, char *argv[])
 	// );
 	
 	// Detect the landmarks on a single image:
-	Mat image = cv::imread("image_0005.png");
+	Mat image = cv::imread("examples/data/ibug_lfpw_trainset/image_0005.png");
 	vector<cv::Rect> detected_faces;
 	face_cascade.detectMultiScale(image, detected_faces, 1.2, 2, 0, cv::Size(50, 50));
 	Mat initial_alignment = align_mean(model_mean, cv::Rect(detected_faces[0]));
@@ -532,11 +537,6 @@ int main(int argc, char *argv[])
 	draw_landmarks(image, prediction, { 0, 0, 255 });
 	cv::imwrite("out.png", image);
 	cout << "Ran the trained model on an image and saved the result to out.png." << endl;
-
-	// Save the learned model:
-	std::ofstream learned_model_file("landmark_regressor_ibug_5lms.bin", std::ios::binary);
-	cereal::BinaryOutputArchive output_archive(learned_model_file);
-	output_archive(supervised_descent_model);
 
 	return EXIT_SUCCESS;
 }
