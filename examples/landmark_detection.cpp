@@ -444,6 +444,7 @@ void load_self_data(std::string filepath, vector<Mat>& images, Mat& landmarks, M
 int main(int argc, char *argv[])
 {
 	fs::path trainingset, meanfile, facedetector;
+    bool isTrain;
 	try {
 		po::options_description desc("Allowed options");
 		desc.add_options()
@@ -453,6 +454,7 @@ int main(int argc, char *argv[])
 				"path to ibug LFPW example images and landmarks")
 			("mean,m", po::value<fs::path>(&meanfile)->required()->default_value("examples/data/mean74"),
 				"pre-calculated mean from ibug LFPW")
+            ("train,t", po::value<bool>(&isTrain)->required()->default_value(false), "is need to train")
 			("facedetector,f", po::value<fs::path>(&facedetector)->required()->default_value("examples/data/haarcascade_frontalface_alt2.xml"),
 				"full path to OpenCV's face detector (haarcascade_frontalface_alt2.xml)")
 			;
@@ -473,53 +475,75 @@ int main(int argc, char *argv[])
 
 	// Load the pre-calculated (and scaled) mean of all landmarks:
 	Mat model_mean = load_self_mean(meanfile);
-	vector<Mat> training_images;
-	Mat training_landmarks;
-	Mat x0;
-	try	{
-		//std::tie(training_images, training_landmarks) = load_ibug_data(trainingset);
-		load_self_data(trainingset.string(), training_images, training_landmarks, model_mean, x0);
-	}
-	catch (const fs::filesystem_error& e)
-	{
-		cout << e.what() << endl;
-		return EXIT_FAILURE;
-	}
+    std::string landmarkName = "landmark_regressor_self.bin";
+    // Load the face detector from OpenCV:
+    cv::CascadeClassifier face_cascade;
+    if (!face_cascade.load(facedetector.string()))
+    {
+        cout << "Error loading face detection model." << endl;
+        return EXIT_FAILURE;
+    }
+    // Create 3 regularised linear regressors in series:
+    vector<LinearRegressor<>> regressors;
+    regressors.emplace_back(LinearRegressor<>(Regulariser(Regulariser::RegularisationType::MatrixNorm, 0.1f, true)));
+    regressors.emplace_back(LinearRegressor<>(Regulariser(Regulariser::RegularisationType::MatrixNorm, 0.1f, true)));
+    regressors.emplace_back(LinearRegressor<>(Regulariser(Regulariser::RegularisationType::MatrixNorm, 0.1f, true)));
+    SupervisedDescentOptimiser<LinearRegressor<>> supervised_descent_model(regressors);
 
-	// Load the face detector from OpenCV:
-	cv::CascadeClassifier face_cascade;
-	if (!face_cascade.load(facedetector.string()))
-	{
-		cout << "Error loading face detection model." << endl;
-		return EXIT_FAILURE;
-	}
-	
-	// We might want to augment the training set by perturbing the
-	// initialisations, which we skip here.
+    if (isTrain) {
+        vector<Mat> training_images;
+        Mat training_landmarks;
+        Mat x0;
+        try	{
+            //std::tie(training_images, training_landmarks) = load_ibug_data(trainingset);
+            load_self_data(trainingset.string(), training_images, training_landmarks, model_mean, x0);
+        }
+        catch (const fs::filesystem_error& e)
+        {
+            cout << e.what() << endl;
+            return EXIT_FAILURE;
+        }
 
-	// Create 3 regularised linear regressors in series:
-	vector<LinearRegressor<>> regressors;
-	regressors.emplace_back(LinearRegressor<>(Regulariser(Regulariser::RegularisationType::MatrixNorm, 0.1f, true)));
-	regressors.emplace_back(LinearRegressor<>(Regulariser(Regulariser::RegularisationType::MatrixNorm, 0.1f, true)));
-	regressors.emplace_back(LinearRegressor<>(Regulariser(Regulariser::RegularisationType::MatrixNorm, 0.1f, true)));
-	
-	SupervisedDescentOptimiser<LinearRegressor<>> supervised_descent_model(regressors);
-	
-	HogTransform hog(training_images, VlHogVariant::VlHogVariantUoctti, 3 /*numCells*/, 12 /*cellSize*/, 4 /*numBins*/);
+        
+        // We might want to augment the training set by perturbing the
+        // initialisations, which we skip here.
+        HogTransform hog(training_images, VlHogVariant::VlHogVariantUoctti, 3 /*numCells*/, 12 /*cellSize*/, 4 /*numBins*/);
+        // Train the model. We'll also specify an optional callback function:
+        cout << "Training the model, printing the residual after each learned regressor: " << endl;
+        auto print_residual = [&training_landmarks](const cv::Mat& current_predictions) {
+            cout << "Current training residual: ";
+            cout << cv::norm(current_predictions, training_landmarks, cv::NORM_L2) / cv::norm(training_landmarks, cv::NORM_L2) << endl;
+        };
+        
+        supervised_descent_model.train(training_landmarks, x0, Mat(), hog, print_residual);
 
-	// Train the model. We'll also specify an optional callback function:
-	cout << "Training the model, printing the residual after each learned regressor: " << endl;
-	auto print_residual = [&training_landmarks](const cv::Mat& current_predictions) {
-		cout << "Current training residual: ";
-		cout << cv::norm(current_predictions, training_landmarks, cv::NORM_L2) / cv::norm(training_landmarks, cv::NORM_L2) << endl;
-	};
-	
-	supervised_descent_model.train(training_landmarks, x0, Mat(), hog, print_residual);
-
-	// Save the learned model:
-	std::ofstream learned_model_file("landmark_regressor_self.bin", std::ios::binary);
-	cereal::BinaryOutputArchive output_archive(learned_model_file);
-	output_archive(supervised_descent_model);
+        // Save the learned model:
+        std::ofstream learned_model_file(landmarkName, std::ios::binary);
+        cereal::BinaryOutputArchive output_archive(learned_model_file);
+        output_archive(supervised_descent_model);
+    } else {
+        std::ifstream file(landmarkName, std::ios::binary);
+        if(!file.is_open())
+            return EXIT_FAILURE;
+        cereal::BinaryInputArchive input_archive(file);
+        input_archive(supervised_descent_model);
+        file.close();
+        for (int index = 4; index < argc; index++) {
+            //Mat image = cv::imread("examples/data/ibug_lfpw_trainset/image_0005.png");
+			std::string filename(argv[index]);
+			std::cout << filename << std::endl;
+			Mat image = cv::imread(filename);
+            vector<cv::Rect> detected_faces;
+            face_cascade.detectMultiScale(image, detected_faces, 1.2, 2, 0, cv::Size(50, 50));
+            Mat initial_alignment = align_mean(model_mean, cv::Rect(detected_faces[0]));
+            Mat prediction = supervised_descent_model.predict(initial_alignment, Mat(), HogTransform({ image }, VlHogVariant::VlHogVariantUoctti, 3, 12, 4));
+            draw_landmarks(image, prediction, { 0, 0, 255 });
+            cv::imshow("dst", image);
+            cv::waitKey();
+            //cv::imwrite("out.png", image);
+            //cout << "Ran the trained model on an image and saved the result to out.png." << endl;
+        }
+    }
 
 	// To test on a whole bunch of images, we could do something roughly like this:
 	// supervisedDescentModel.test(x0_ts,
@@ -529,14 +553,5 @@ int main(int argc, char *argv[])
 	// );
 	
 	// Detect the landmarks on a single image:
-	Mat image = cv::imread("examples/data/ibug_lfpw_trainset/image_0005.png");
-	vector<cv::Rect> detected_faces;
-	face_cascade.detectMultiScale(image, detected_faces, 1.2, 2, 0, cv::Size(50, 50));
-	Mat initial_alignment = align_mean(model_mean, cv::Rect(detected_faces[0]));
-	Mat prediction = supervised_descent_model.predict(initial_alignment, Mat(), HogTransform({ image }, VlHogVariant::VlHogVariantUoctti, 3, 12, 4));
-	draw_landmarks(image, prediction, { 0, 0, 255 });
-	cv::imwrite("out.png", image);
-	cout << "Ran the trained model on an image and saved the result to out.png." << endl;
-
 	return EXIT_SUCCESS;
 }
